@@ -1,5 +1,7 @@
 import json
+import re
 import sqlite3
+from difflib import SequenceMatcher
 
 import requests
 from langchain_core.tools import tool
@@ -18,71 +20,119 @@ from src.retrieval import retrieve_documents
 ranker = create_reranker()
 
 
-def get_shipment_record(tracking_id: str):
+EGYPT_LOCATION_HINTS = {
+    "egypt",
+    "cairo",
+    "new cairo",
+    "nasr city",
+    "heliopolis",
+    "maadi",
+    "mokattam",
+    "zamalek",
+    "dokki",
+    "mohandessin",
+    "giza",
+    "6 october",
+    "6th october",
+    "october city",
+    "sheikh zayed",
+    "alexandria",
+    "mansoura",
+    "tanta",
+    "ismailia",
+    "suez",
+    "port said",
+    "fayoum",
+    "minya",
+    "aswan",
+    "luxor",
+    "hurghada",
+    "sharm el sheikh",
+}
 
-    tracking_id = tracking_id.strip().upper()
 
-    with sqlite3.connect(DATABASE_PATH) as connection:
+def get_shipment_record(tracking_id):
+    connection = sqlite3.connect(
+        DATABASE_PATH
+    )
 
-        cursor = connection.cursor()
+    cursor = connection.cursor()
 
-        cursor.execute(
-            """
-            SELECT
-                tracking_id,
-                origin,
-                origin_lat,
-                origin_lon,
-                destination,
-                destination_lat,
-                destination_lon,
-                service,
-                status,
-                current_location,
-                current_lat,
-                current_lon,
-                expected_delivery,
-                last_update,
-                delivery_attempts,
-                notes
-            FROM shipments
-            WHERE tracking_id = ?
-            """,
-            (tracking_id,),
-        )
+    cursor.execute(
+        """
+        SELECT
+            tracking_id,
+            origin,
+            origin_lat,
+            origin_lon,
+            destination,
+            destination_lat,
+            destination_lon,
+            service,
+            status,
+            current_location,
+            current_lat,
+            current_lon,
+            expected_delivery,
+            last_update,
+            delivery_attempts,
+            notes
+        FROM shipments
+        WHERE tracking_id = ?
+        """,
+        (
+            tracking_id.strip().upper(),
+        ),
+    )
 
-        shipment = cursor.fetchone()
+    row = cursor.fetchone()
 
-    if shipment is None:
+    connection.close()
+
+    if not row:
         return None
 
-    return {
-        "tracking_id": shipment[0],
-        "origin": shipment[1],
-        "origin_lat": shipment[2],
-        "origin_lon": shipment[3],
-        "destination": shipment[4],
-        "destination_lat": shipment[5],
-        "destination_lon": shipment[6],
-        "service": shipment[7],
-        "status": shipment[8],
-        "current_location": shipment[9],
-        "current_lat": shipment[10],
-        "current_lon": shipment[11],
-        "expected_delivery": shipment[12],
-        "last_update": shipment[13],
-        "delivery_attempts": shipment[14],
-        "notes": shipment[15],
-    }
+    columns = [
+        "tracking_id",
+        "origin",
+        "origin_lat",
+        "origin_lon",
+        "destination",
+        "destination_lat",
+        "destination_lon",
+        "service",
+        "status",
+        "current_location",
+        "current_lat",
+        "current_lon",
+        "expected_delivery",
+        "last_update",
+        "delivery_attempts",
+        "notes",
+    ]
+
+    return dict(
+        zip(
+            columns,
+            row,
+        )
+    )
 
 
 @tool
-def search_knowledge_base(query: str) -> str:
-    """Search OrbitX policies, services, delivery rules, and support information."""
+def search_knowledge_base(query):
+    """
+    Search the OrbitX knowledge base for
+    company policies, services, pricing,
+    restrictions, insurance, returns,
+    claims and other company information.
+    """
 
-    documents = retrieve_documents(query)
+    documents = retrieve_documents(
+        query
+    )
 
-    reranked_documents = rerank_documents(
+    ranked_documents = rerank_documents(
         query,
         documents,
         ranker,
@@ -90,229 +140,714 @@ def search_knowledge_base(query: str) -> str:
 
     results = []
 
-    for document in reranked_documents:
+    for document in ranked_documents:
 
         page = document.metadata.get(
             "page",
-            0,
+            "unknown",
         )
+
+        if isinstance(
+            page,
+            int,
+        ):
+            page += 1
 
         results.append(
-            f"[Source: page {page + 1}]\n"
-            f"{document.page_content}"
+            (
+                f"[Source: page {page}]\n"
+                f"{document.page_content}"
+            )
         )
 
-    return "\n\n".join(results)
+    return "\n\n".join(
+        results
+    )
 
 
 @tool
-def track_shipment(tracking_id: str) -> str:
-    """Track an OrbitX shipment using its tracking ID."""
+def track_shipment(tracking_id):
+    """
+    Track an OrbitX shipment using its
+    tracking ID.
+    """
 
-    try:
+    shipment = get_shipment_record(
+        tracking_id
+    )
 
-        shipment = get_shipment_record(
-            tracking_id
-        )
-
-    except sqlite3.Error:
-
-        return (
-            "The shipment database is "
-            "currently unavailable."
-        )
-
-    if shipment is None:
+    if not shipment:
 
         return (
-            f"No shipment was found with tracking ID "
+            "No OrbitX shipment was found "
+            f"with tracking ID "
             f"{tracking_id.strip().upper()}."
         )
 
     result = {
-        "tracking_id": shipment["tracking_id"],
-        "origin": shipment["origin"],
-        "destination": shipment["destination"],
-        "service": shipment["service"],
-        "status": shipment["status"],
-        "current_location": shipment["current_location"],
-        "expected_delivery": shipment["expected_delivery"],
-        "last_update": shipment["last_update"],
-        "delivery_attempts": shipment["delivery_attempts"],
-        "notes": shipment["notes"],
+        "tracking_id":
+            shipment["tracking_id"],
+
+        "origin":
+            shipment["origin"],
+
+        "destination":
+            shipment["destination"],
+
+        "service":
+            shipment["service"],
+
+        "status":
+            shipment["status"],
+
+        "current_location":
+            shipment["current_location"],
+
+        "expected_delivery":
+            shipment["expected_delivery"],
+
+        "last_update":
+            shipment["last_update"],
+
+        "delivery_attempts":
+            shipment["delivery_attempts"],
+
+        "notes":
+            shipment["notes"],
     }
 
     return json.dumps(
         result,
-        indent=2,
+        ensure_ascii=False,
     )
 
 
-def geocode_location(
-    location: str,
-    country_hint: str | None = None,
+def normalize_location_text(value):
+    value = str(
+        value
+    ).lower().strip()
+
+    value = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
+
+
+def has_egypt_hint(location):
+    normalized = normalize_location_text(
+        location
+    )
+
+    for hint in EGYPT_LOCATION_HINTS:
+
+        if hint in normalized:
+            return True
+
+    return False
+
+
+def is_egypt_location(
+    location_data,
 ):
+    if not location_data:
+        return False
 
-    search_text = location
-
-    if country_hint:
-
-        search_text = (
-            f"{location}, {country_hint}"
+    country_code = str(
+        location_data.get(
+            "country_code",
+            "",
         )
+    ).strip().upper()
+
+    country = str(
+        location_data.get(
+            "country",
+            "",
+        )
+    ).strip().lower()
+
+    return (
+        country_code
+        in {
+            "EG",
+            "EGY",
+        }
+        or country == "egypt"
+    )
+
+
+def location_match_score(
+    query,
+    location_data,
+):
+    if not location_data:
+        return 0.0
+
+    query_text = normalize_location_text(
+        query
+    )
+
+    candidate_values = [
+        location_data.get(
+            "name",
+            "",
+        ),
+        location_data.get(
+            "locality",
+            "",
+        ),
+        location_data.get(
+            "neighbourhood",
+            "",
+        ),
+        location_data.get(
+            "county",
+            "",
+        ),
+        location_data.get(
+            "region",
+            "",
+        ),
+    ]
+
+    label = location_data.get(
+        "label",
+        "",
+    )
+
+    if label:
+
+        candidate_values.append(
+            label.split(
+                ","
+            )[0]
+        )
+
+    scores = []
+
+    for candidate in candidate_values:
+
+        candidate_text = (
+            normalize_location_text(
+                candidate
+            )
+        )
+
+        if not candidate_text:
+            continue
+
+        similarity = SequenceMatcher(
+            None,
+            query_text,
+            candidate_text,
+        ).ratio()
+
+        if (
+            query_text
+            == candidate_text
+        ):
+            similarity = 1.0
+
+        elif (
+            query_text
+            in candidate_text
+            or candidate_text
+            in query_text
+        ):
+            similarity = max(
+                similarity,
+                0.92,
+            )
+
+        scores.append(
+            similarity
+        )
+
+    if not scores:
+        return 0.0
+
+    return max(
+        scores
+    )
+
+
+def feature_to_location(
+    feature,
+):
+    geometry = feature.get(
+        "geometry",
+        {},
+    )
+
+    coordinates = geometry.get(
+        "coordinates"
+    )
+
+    if not coordinates:
+        return None
+
+    properties = feature.get(
+        "properties",
+        {},
+    )
+
+    return {
+        "coordinates":
+            coordinates,
+
+        "label":
+            properties.get(
+                "label",
+                "",
+            ),
+
+        "name":
+            properties.get(
+                "name",
+                "",
+            ),
+
+        "country":
+            properties.get(
+                "country",
+                "",
+            ),
+
+        "country_code":
+            properties.get(
+                "country_a",
+                "",
+            ),
+
+        "region":
+            properties.get(
+                "region",
+                "",
+            ),
+
+        "county":
+            properties.get(
+                "county",
+                "",
+            ),
+
+        "locality":
+            properties.get(
+                "locality",
+                "",
+            ),
+
+        "neighbourhood":
+            properties.get(
+                "neighbourhood",
+                "",
+            ),
+
+        "layer":
+            properties.get(
+                "layer",
+                "",
+            ),
+
+        "confidence":
+            properties.get(
+                "confidence",
+                0,
+            ),
+    }
+
+
+def select_best_location(
+    query,
+    features,
+):
+    locations = []
+
+    for feature in features:
+
+        location = feature_to_location(
+            feature
+        )
+
+        if location:
+            locations.append(
+                location
+            )
+
+    if not locations:
+        return None
+
+    best_location = max(
+        locations,
+        key=lambda location: (
+            location_match_score(
+                query,
+                location,
+            )
+        ),
+    )
+
+    return best_location
+
+
+def geocode_location(
+    location,
+    country_code=None,
+):
+    if not ORS_API_KEY:
+        return None
+
+    location = str(
+        location
+    ).strip()
+
+    if not location:
+        return None
 
     url = (
         "https://api.heigit.org/"
         "pelias/v1/search"
     )
 
-    headers = {
-        "Authorization": ORS_API_KEY
-    }
-
     params = {
-        "text": search_text,
-        "size": 1,
+        "text":
+            location,
+
+        "size":
+            5,
+
+        "layers":
+            "coarse",
     }
 
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=15,
-    )
+    if country_code:
 
-    response.raise_for_status()
+        params[
+            "boundary.country"
+        ] = country_code
 
-    data = response.json()
+    headers = {
+        "Authorization":
+            ORS_API_KEY
+    }
 
-    features = data.get(
-        "features",
-        [],
-    )
+    try:
 
-    if not features:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        features = data.get(
+            "features",
+            [],
+        )
+
+        return select_best_location(
+            location,
+            features,
+        )
+
+    except (
+        requests.RequestException,
+        ValueError,
+        KeyError,
+        IndexError,
+    ):
         return None
 
-    return features[0][
-        "geometry"
-    ]["coordinates"]
+
+def resolve_location(
+    location,
+):
+    egypt_result = geocode_location(
+        location,
+        country_code="EG",
+    )
+
+    global_result = geocode_location(
+        location
+    )
+
+    if (
+        not egypt_result
+        and not global_result
+    ):
+        return None
+
+    if (
+        egypt_result
+        and not global_result
+    ):
+        return egypt_result
+
+    if (
+        global_result
+        and not egypt_result
+    ):
+        return global_result
+
+    if has_egypt_hint(
+        location
+    ):
+        return egypt_result
+
+    if (
+        is_egypt_location(
+            global_result
+        )
+    ):
+        return global_result
+
+    egypt_score = location_match_score(
+        location,
+        egypt_result,
+    )
+
+    global_score = location_match_score(
+        location,
+        global_result,
+    )
+
+    if (
+        not is_egypt_location(
+            global_result
+        )
+        and global_score
+        > egypt_score
+    ):
+        return global_result
+
+    if (
+        global_score >= 0.85
+        and egypt_score < 0.65
+    ):
+        return global_result
+
+    return egypt_result
+
+
+def resolve_quote_locations(
+    origin,
+    destination,
+):
+    origin_data = resolve_location(
+        origin
+    )
+
+    destination_data = (
+        resolve_location(
+            destination
+        )
+    )
+
+    if not origin_data:
+
+        return {
+            "type":
+                "invalid_origin"
+        }
+
+    if not destination_data:
+
+        return {
+            "type":
+                "invalid_destination"
+        }
+
+    origin_is_egypt = (
+        is_egypt_location(
+            origin_data
+        )
+    )
+
+    destination_is_egypt = (
+        is_egypt_location(
+            destination_data
+        )
+    )
+
+    if (
+        origin_is_egypt
+        and destination_is_egypt
+    ):
+
+        return {
+            "type":
+                "domestic",
+
+            "origin":
+                origin_data,
+
+            "destination":
+                destination_data,
+        }
+
+    return {
+        "type":
+            "international",
+
+        "origin":
+            origin_data,
+
+        "destination":
+            destination_data,
+    }
 
 
 def get_route_details(
     origin_coordinates,
     destination_coordinates,
 ):
+    if not ORS_API_KEY:
+        return None
 
     url = (
         "https://api.heigit.org/"
-        "openrouteservice/v2/directions/"
-        "driving-car/geojson"
+        "openrouteservice/v2/"
+        "directions/driving-car/"
+        "geojson"
     )
 
     headers = {
-        "Authorization": ORS_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "application/geo+json",
+        "Authorization":
+            ORS_API_KEY,
+
+        "Content-Type":
+            "application/json",
+
+        "Accept":
+            "application/geo+json",
     }
 
-    body = {
+    payload = {
         "coordinates": [
             origin_coordinates,
             destination_coordinates,
         ]
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json=body,
-        timeout=20,
-    )
+    try:
 
-    response.raise_for_status()
-
-    data = response.json()
-
-    feature = data[
-        "features"
-    ][0]
-
-    summary = feature[
-        "properties"
-    ]["summary"]
-
-    route_path = feature[
-        "geometry"
-    ]["coordinates"]
-
-    distance_km = (
-        summary["distance"] / 1000
-    )
-
-    duration_minutes = (
-        summary["duration"] / 60
-    )
-
-    if len(route_path) > 300:
-
-        step = max(
-            1,
-            len(route_path) // 300,
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=20,
         )
 
-        route_path = route_path[
-            ::step
-        ]
+        response.raise_for_status()
 
-    return {
-        "distance_km": distance_km,
-        "duration_minutes": duration_minutes,
-        "route_path": route_path,
-    }
+        data = response.json()
+
+        features = data.get(
+            "features",
+            [],
+        )
+
+        if not features:
+            return None
+
+        feature = features[0]
+
+        summary = (
+            feature[
+                "properties"
+            ][
+                "summary"
+            ]
+        )
+
+        route_path = (
+            feature[
+                "geometry"
+            ][
+                "coordinates"
+            ]
+        )
+
+        return {
+            "distance_km":
+                round(
+                    summary[
+                        "distance"
+                    ]
+                    / 1000,
+                    2,
+                ),
+
+            "duration_minutes":
+                round(
+                    summary[
+                        "duration"
+                    ]
+                    / 60
+                ),
+
+            "route_path":
+                route_path,
+        }
+
+    except (
+        requests.RequestException,
+        ValueError,
+        KeyError,
+        IndexError,
+    ):
+        return None
 
 
 def get_shipment_map_data(
-    tracking_id: str,
+    tracking_id,
 ):
+    shipment = get_shipment_record(
+        tracking_id
+    )
 
-    if not ORS_API_KEY:
-        return None
-
-    try:
-
-        shipment = get_shipment_record(
-            tracking_id
-        )
-
-    except sqlite3.Error:
-
-        return None
-
-    if shipment is None:
+    if not shipment:
         return None
 
     origin_coordinates = [
-        shipment["origin_lon"],
-        shipment["origin_lat"],
+        shipment[
+            "origin_lon"
+        ],
+        shipment[
+            "origin_lat"
+        ],
     ]
 
     destination_coordinates = [
-        shipment["destination_lon"],
-        shipment["destination_lat"],
+        shipment[
+            "destination_lon"
+        ],
+        shipment[
+            "destination_lat"
+        ],
     ]
 
-    current_coordinates = None
-
-    if (
-        shipment["current_lat"] is not None
-        and shipment["current_lon"] is not None
-    ):
-
-        current_coordinates = [
-            shipment["current_lon"],
-            shipment["current_lat"],
-        ]
+    current_coordinates = [
+        shipment[
+            "current_lon"
+        ],
+        shipment[
+            "current_lat"
+        ],
+    ]
 
     route_path = []
 
@@ -320,16 +855,16 @@ def get_shipment_map_data(
     duration_minutes = None
 
     if (
-        shipment["service"].lower()
-        != "international"
+        shipment["service"]
+        != "International"
     ):
 
-        try:
+        route = get_route_details(
+            origin_coordinates,
+            destination_coordinates,
+        )
 
-            route = get_route_details(
-                origin_coordinates,
-                destination_coordinates,
-            )
+        if route:
 
             route_path = route[
                 "route_path"
@@ -343,13 +878,7 @@ def get_shipment_map_data(
                 "duration_minutes"
             ]
 
-        except (
-            requests.RequestException,
-            KeyError,
-            IndexError,
-            TypeError,
-            ValueError,
-        ):
+        else:
 
             route_path = [
                 origin_coordinates,
@@ -365,242 +894,481 @@ def get_shipment_map_data(
 
     points = [
         {
-            "name": "Origin",
-            "location": shipment["origin"],
-            "coordinates": origin_coordinates,
-            "color": [15, 23, 42],
+            "name":
+                "Origin",
+
+            "location":
+                shipment[
+                    "origin"
+                ],
+
+            "coordinates":
+                origin_coordinates,
+
+            "color": [
+                15,
+                23,
+                42,
+            ],
         },
+
         {
-            "name": "Destination",
-            "location": shipment["destination"],
-            "coordinates": destination_coordinates,
-            "color": [37, 99, 235],
+            "name":
+                "Latest recorded location",
+
+            "location":
+                shipment[
+                    "current_location"
+                ],
+
+            "coordinates":
+                current_coordinates,
+
+            "color": [
+                14,
+                165,
+                233,
+            ],
+        },
+
+        {
+            "name":
+                "Destination",
+
+            "location":
+                shipment[
+                    "destination"
+                ],
+
+            "coordinates":
+                destination_coordinates,
+
+            "color": [
+                37,
+                99,
+                235,
+            ],
         },
     ]
 
-    if current_coordinates:
-
-        points.append(
-            {
-                "name": "Latest recorded location",
-                "location": shipment[
-                    "current_location"
-                ],
-                "coordinates": current_coordinates,
-                "color": [14, 165, 233],
-            }
-        )
-
     return {
-        "points": points,
-        "route_path": route_path,
-        "distance_km": distance_km,
-        "duration_minutes": duration_minutes,
+        "tracking_id":
+            shipment[
+                "tracking_id"
+            ],
+
+        "points":
+            points,
+
+        "route_path":
+            route_path,
+
+        "distance_km":
+            distance_km,
+
+        "duration_minutes":
+            duration_minutes,
     }
 
 
 @tool
 def estimate_delivery_quote(
-    origin: str,
-    destination: str,
-    weight_kg: float,
-    service_type: str,
-    insurance: bool = False,
-    declared_value: float = 0,
-) -> str:
-    """Estimate an OrbitX domestic delivery price using live route distance."""
+    origin,
+    destination,
+    weight_kg,
+    service_type,
+    insurance=False,
+    declared_value=0,
+):
+    """
+    Estimate a live OrbitX domestic delivery
+    quote within Egypt.
+
+    OrbitX also offers shipping to selected
+    international destinations, but
+    international pricing is handled
+    separately.
+
+    Required information:
+    origin, destination, package weight and
+    service type.
+
+    Supported domestic services:
+    Standard, Express and Same-Day.
+    """
 
     if not ORS_API_KEY:
 
         return (
-            "The routing API key is not configured."
+            "The delivery quote service "
+            "is temporarily unavailable."
+        )
+
+    try:
+
+        weight_kg = float(
+            weight_kg
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return (
+            "Please provide a valid "
+            "package weight."
         )
 
     if weight_kg <= 0:
 
         return (
-            "Shipment weight must be greater "
-            "than 0 kg."
+            "Package weight must be "
+            "greater than 0 kg."
         )
 
     if weight_kg > 30:
 
         return (
-            "Shipments above 30 kg require "
-            "OrbitX freight support."
+            "OrbitX live delivery quotes "
+            "support packages up to 30 kg."
         )
 
-    service = (
-        service_type
+    normalized_service = (
+        str(
+            service_type
+        )
         .strip()
         .lower()
-        .replace("_", "-")
+        .replace(
+            "_",
+            "-"
+        )
     )
 
-    if service == "same day":
-        service = "same-day"
+    service_map = {
+        "standard":
+            "Standard",
+
+        "express":
+            "Express",
+
+        "same-day":
+            "Same-Day",
+
+        "same day":
+            "Same-Day",
+    }
+
+    if (
+        normalized_service
+        not in service_map
+    ):
+
+        return (
+            "Please choose one of the "
+            "supported domestic services: "
+            "Standard, Express or Same-Day."
+        )
+
+    service = service_map[
+        normalized_service
+    ]
+
+    location_result = (
+        resolve_quote_locations(
+            origin,
+            destination,
+        )
+    )
+
+    location_type = (
+        location_result[
+            "type"
+        ]
+    )
+
+    if (
+        location_type
+        == "invalid_origin"
+    ):
+
+        return (
+            "I couldn't identify the origin "
+            "location. Please check the "
+            "location name and try again."
+        )
+
+    if (
+        location_type
+        == "invalid_destination"
+    ):
+
+        return (
+            "I couldn't identify the "
+            "destination location. Please "
+            "check the location name and "
+            "try again."
+        )
+
+    origin_data = (
+        location_result[
+            "origin"
+        ]
+    )
+
+    destination_data = (
+        location_result[
+            "destination"
+        ]
+    )
+
+    if (
+        location_type
+        == "international"
+    ):
+
+        result = {
+            "available":
+                False,
+
+            "quote_type":
+                "international",
+
+            "origin":
+                origin_data[
+                    "label"
+                ],
+
+            "destination":
+                destination_data[
+                    "label"
+                ],
+
+            "origin_country":
+                origin_data.get(
+                    "country",
+                    "",
+                ),
+
+            "destination_country":
+                destination_data.get(
+                    "country",
+                    "",
+                ),
+
+            "title":
+                "International shipment",
+
+            "message":
+                (
+                    "OrbitX offers shipping to "
+                    "selected international "
+                    "destinations. Live "
+                    "international pricing is "
+                    "not available in this "
+                    "calculator. Please request "
+                    "an international quote "
+                    "through OrbitX support."
+                ),
+        }
+
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+        )
+
+    origin_coordinates = (
+        origin_data[
+            "coordinates"
+        ]
+    )
+
+    destination_coordinates = (
+        destination_data[
+            "coordinates"
+        ]
+    )
+
+    route = get_route_details(
+        origin_coordinates,
+        destination_coordinates,
+    )
+
+    if not route:
+
+        return (
+            "I couldn't calculate a road route "
+            "between those locations. Please "
+            "check the locations and try again."
+        )
+
+    distance_km = route[
+        "distance_km"
+    ]
+
+    duration_minutes = route[
+        "duration_minutes"
+    ]
+
+    if (
+        service == "Same-Day"
+        and distance_km > 60
+    ):
+
+        result = {
+            "available":
+                False,
+
+            "quote_type":
+                "domestic_unavailable",
+
+            "service":
+                service,
+
+            "reason":
+                (
+                    "Same-Day delivery is "
+                    "available only for routes "
+                    "up to 60 km."
+                ),
+
+            "recommended_service":
+                "Express",
+
+            "origin":
+                origin_data[
+                    "label"
+                ],
+
+            "destination":
+                destination_data[
+                    "label"
+                ],
+
+            "distance_km":
+                distance_km,
+        }
+
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+        )
 
     pricing = {
-        "standard": {
-            "base": 45,
-            "extra_weight": 12,
-            "distance": 0.55,
+        "Standard": {
+            "base_fee":
+                45,
+
+            "extra_weight":
+                12,
+
+            "distance_rate":
+                0.55,
+
+            "distance_threshold":
+                30,
         },
-        "express": {
-            "base": 70,
-            "extra_weight": 16,
-            "distance": 0.75,
+
+        "Express": {
+            "base_fee":
+                70,
+
+            "extra_weight":
+                16,
+
+            "distance_rate":
+                0.75,
+
+            "distance_threshold":
+                30,
         },
-        "same-day": {
-            "base": 95,
-            "extra_weight": 20,
-            "distance": 1,
+
+        "Same-Day": {
+            "base_fee":
+                95,
+
+            "extra_weight":
+                20,
+
+            "distance_rate":
+                1.00,
+
+            "distance_threshold":
+                0,
         },
     }
 
-    if service not in pricing:
+    rules = pricing[
+        service
+    ]
 
-        return (
-            "Service type must be Standard, "
-            "Express, or Same-Day."
-        )
+    base_fee = float(
+        rules[
+            "base_fee"
+        ]
+    )
+
+    extra_weight_fee = 0.0
+
+    if weight_kg > 2:
+
+        extra_weight_fee = (
+            weight_kg - 2
+        ) * rules[
+            "extra_weight"
+        ]
+
+    billable_distance = max(
+        0,
+        distance_km
+        - rules[
+            "distance_threshold"
+        ],
+    )
+
+    distance_fee = (
+        billable_distance
+        * rules[
+            "distance_rate"
+        ]
+    )
+
+    insurance_fee = 0.0
 
     if insurance:
+
+        try:
+
+            declared_value = float(
+                declared_value
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            return (
+                "Please provide a valid "
+                "declared shipment value."
+            )
 
         if declared_value <= 0:
 
             return (
                 "A declared value is required "
-                "when insurance is selected."
+                "when shipment insurance "
+                "is selected."
             )
 
         if declared_value > 50000:
 
             return (
                 "The maximum declared value "
+                "supported by this quote tool "
                 "is 50,000 EGP."
             )
-
-    try:
-
-        origin_coordinates = geocode_location(
-            origin,
-            "Egypt",
-        )
-
-        destination_coordinates = geocode_location(
-            destination,
-            "Egypt",
-        )
-
-        if origin_coordinates is None:
-
-            return (
-                f"Could not find the origin: "
-                f"{origin}."
-            )
-
-        if destination_coordinates is None:
-
-            return (
-                f"Could not find the destination: "
-                f"{destination}."
-            )
-
-        route = get_route_details(
-            origin_coordinates,
-            destination_coordinates,
-        )
-
-        distance_km = route[
-            "distance_km"
-        ]
-
-        duration_minutes = route[
-            "duration_minutes"
-        ]
-
-    except (
-        requests.RequestException,
-        KeyError,
-        IndexError,
-        TypeError,
-        ValueError,
-    ):
-
-        return (
-            "The routing service is currently "
-            "unavailable."
-        )
-
-    if (
-        service == "same-day"
-        and distance_km > 60
-    ):
-
-        return json.dumps(
-            {
-                "available": False,
-                "service": "Same-Day",
-                "distance_km": round(
-                    distance_km,
-                    2,
-                ),
-                "reason": (
-                    "Same-Day delivery is only "
-                    "available for routes up to 60 km."
-                ),
-                "recommended_service": "Express",
-            },
-            indent=2,
-        )
-
-    service_pricing = pricing[
-        service
-    ]
-
-    base_fee = service_pricing[
-        "base"
-    ]
-
-    extra_weight = max(
-        0,
-        weight_kg - 2,
-    )
-
-    weight_fee = (
-        extra_weight
-        * service_pricing[
-            "extra_weight"
-        ]
-    )
-
-    if service == "same-day":
-
-        distance_fee = (
-            distance_km
-            * service_pricing[
-                "distance"
-            ]
-        )
-
-    else:
-
-        extra_distance = max(
-            0,
-            distance_km - 30,
-        )
-
-        distance_fee = (
-            extra_distance
-            * service_pricing[
-                "distance"
-            ]
-        )
-
-    insurance_fee = 0
-
-    if insurance:
 
         insurance_fee = max(
             20,
@@ -609,66 +1377,101 @@ def estimate_delivery_quote(
 
     subtotal = (
         base_fee
-        + weight_fee
+        + extra_weight_fee
         + distance_fee
-    )
-
-    total = (
-        subtotal
         + insurance_fee
     )
 
+    estimated_price = round(
+        subtotal,
+        2,
+    )
+
     result = {
-        "available": True,
-        "origin": origin,
-        "destination": destination,
-        "distance_km": round(
+        "available":
+            True,
+
+        "quote_type":
+            "domestic",
+
+        "origin":
+            origin_data[
+                "label"
+            ],
+
+        "destination":
+            destination_data[
+                "label"
+            ],
+
+        "distance_km":
             distance_km,
-            2,
-        ),
-        "estimated_drive_time_minutes": round(
-            duration_minutes
-        ),
-        "weight_kg": weight_kg,
-        "service": (
-            "Same-Day"
-            if service == "same-day"
-            else service.title()
-        ),
-        "insurance": insurance,
-        "declared_value": declared_value,
+
+        "estimated_drive_time_minutes":
+            duration_minutes,
+
+        "weight_kg":
+            weight_kg,
+
+        "service":
+            service,
+
+        "insurance":
+            bool(
+                insurance
+            ),
+
+        "declared_value":
+            (
+                float(
+                    declared_value
+                )
+                if insurance
+                else 0
+            ),
+
         "price_breakdown": {
-            "base_fee": round(
-                base_fee,
-                2,
-            ),
-            "extra_weight_fee": round(
-                weight_fee,
-                2,
-            ),
-            "distance_fee": round(
-                distance_fee,
-                2,
-            ),
-            "insurance_fee": round(
-                insurance_fee,
-                2,
-            ),
-            "subtotal": round(
-                subtotal,
-                2,
-            ),
+            "base_fee":
+                round(
+                    base_fee,
+                    2,
+                ),
+
+            "extra_weight_fee":
+                round(
+                    extra_weight_fee,
+                    2,
+                ),
+
+            "distance_fee":
+                round(
+                    distance_fee,
+                    2,
+                ),
+
+            "insurance_fee":
+                round(
+                    insurance_fee,
+                    2,
+                ),
+
+            "subtotal":
+                round(
+                    subtotal,
+                    2,
+                ),
         },
-        "estimated_price": round(
-            total,
-            2,
-        ),
-        "currency": "EGP",
+
+        "estimated_price":
+            estimated_price,
+
+        "currency":
+            "EGP",
     }
 
     return json.dumps(
         result,
-        indent=2,
+        ensure_ascii=False,
     )
 
 
